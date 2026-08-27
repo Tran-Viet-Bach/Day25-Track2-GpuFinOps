@@ -52,6 +52,31 @@ def discount_stack(
     return cache_mult * batch_mult
 
 
+def cache_is_worth_it(
+    avg_reads: float,
+    write_cost_multiplier: float = 1.25,
+    read_discount: float = 0.10,
+) -> bool:
+    """Determine if prompt caching is economically beneficial based on read frequency.
+
+    Break-even economics:
+      Uncached cost for (1 write + N reads) = (1 + N) * 1.0 * P
+      Cached cost for (1 write + N reads)   = write_cost_multiplier * P + N * read_discount * P
+      Cached is cheaper when:
+        write_cost_multiplier + N * read_discount < 1.0 + N * 1.0
+        => N * (1.0 - read_discount) > (write_cost_multiplier - 1.0)
+        => N > (write_cost_multiplier - 1.0) / (1.0 - read_discount)
+
+    If write_cost_multiplier <= 1.0, any read (N >= 1) is already beneficial.
+    """
+    if avg_reads <= 0:
+        return False
+    if write_cost_multiplier <= 1.0:
+        return avg_reads >= 1.0
+    break_even_reads = (write_cost_multiplier - 1.0) / (1.0 - read_discount)
+    return avg_reads >= break_even_reads
+
+
 def break_even_utilization(discount_frac: float) -> float:
     """Utilization at which a commitment pays off ~= 1 - discount.
 
@@ -60,17 +85,26 @@ def break_even_utilization(discount_frac: float) -> float:
     return max(0.0, min(1.0, 1.0 - discount_frac))
 
 
-def recommend_tier(hours_per_day: float, interruptible: bool, reserved_discount: float = 0.45) -> str:
-    """Pick a purchasing tier from a workload's duty cycle + interruptibility.
+def recommend_tier(
+    hours_per_day: float,
+    interruptible: bool,
+    reserved_discount: float = 0.45,
+    interruption_rate: float = 0.05,
+    duration_years: int = 3,
+    max_tolerable_interrupt_rate: float = 0.15,
+) -> str:
+    """Pick a purchasing tier from a workload's duty cycle + interruptibility + SLA/interruption risk.
 
-    DOCUMENTED simple policy (instructor extension point — swap in your own):
-      - interruptible & not 24/7  -> 'spot'      (checkpoint and ride the discount)
-      - duty cycle >= break-even  -> 'reserved'  (steady, high utilization)
-      - otherwise                 -> 'on_demand' (spiky / low duty)
+    Policy Matrix (with Extension 1 enhancements):
+      - interruptible & not 24/7 & interruption_rate <= max_tolerable -> 'spot'
+      - duty cycle >= break-even (for 1yr or 3yr)                      -> 'reserved'
+      - otherwise (spiky, low duty, or non-interruptible low-duty)    -> 'on_demand'
     """
     duty = max(0.0, hours_per_day) / 24.0
-    be = break_even_utilization(reserved_discount)
-    if interruptible and hours_per_day < 24:
+    effective_reserved_discount = reserved_discount if duration_years >= 3 else (reserved_discount * 0.67)
+    be = break_even_utilization(effective_reserved_discount)
+
+    if interruptible and hours_per_day < 24 and interruption_rate <= max_tolerable_interrupt_rate:
         return "spot"
     if duty >= be:
         return "reserved"
@@ -102,3 +136,4 @@ def spot_checkpoint_cost(
         "on_demand_cost": round(on_demand_cost, 2),
         "savings_pct": round(savings_pct, 1),
     }
+
